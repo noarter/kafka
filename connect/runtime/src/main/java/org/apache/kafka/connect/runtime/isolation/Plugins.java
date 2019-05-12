@@ -62,13 +62,8 @@ public class Plugins {
     }
 
     private static DelegatingClassLoader newDelegatingClassLoader(final List<String> paths) {
-        return (DelegatingClassLoader) AccessController.doPrivileged(
-                new PrivilegedAction() {
-                    @Override
-                    public Object run() {
-                        return new DelegatingClassLoader(paths);
-                    }
-                }
+        return AccessController.doPrivileged(
+                (PrivilegedAction<DelegatingClassLoader>) () -> new DelegatingClassLoader(paths)
         );
     }
 
@@ -102,6 +97,7 @@ public class Plugins {
         );
     }
 
+    @SuppressWarnings("deprecation")
     protected static boolean isInternalConverter(String classPropertyName) {
         return classPropertyName.equals(WorkerConfig.INTERNAL_KEY_CONVERTER_CLASS_CONFIG)
             || classPropertyName.equals(WorkerConfig.INTERNAL_VALUE_CONVERTER_CLASS_CONFIG);
@@ -243,14 +239,15 @@ public class Plugins {
         }
 
         // Determine whether this is a key or value converter based upon the supplied property name ...
+        @SuppressWarnings("deprecation")
         final boolean isKeyConverter = WorkerConfig.KEY_CONVERTER_CLASS_CONFIG.equals(classPropertyName)
                                      || WorkerConfig.INTERNAL_KEY_CONVERTER_CLASS_CONFIG.equals(classPropertyName);
 
         // Configure the Converter using only the old configuration mechanism ...
         String configPrefix = classPropertyName + ".";
         Map<String, Object> converterConfig = config.originalsWithPrefix(configPrefix);
-        log.debug("Configuring the {} converter with configuration:{}{}",
-                  isKeyConverter ? "key" : "value", System.lineSeparator(), converterConfig);
+        log.debug("Configuring the {} converter with configuration keys:{}{}",
+                  isKeyConverter ? "key" : "value", System.lineSeparator(), converterConfig.keySet());
 
         // Have to override schemas.enable from true to false for internal JSON converters
         // Don't have to warn the user about anything since all deprecation warnings take place in the
@@ -318,7 +315,7 @@ public class Plugins {
         String configPrefix = classPropertyName + ".";
         Map<String, Object> converterConfig = config.originalsWithPrefix(configPrefix);
         converterConfig.put(ConverterConfig.TYPE_CONFIG, ConverterType.HEADER.getName());
-        log.debug("Configuring the header converter with configuration:{}{}", System.lineSeparator(), converterConfig);
+        log.debug("Configuring the header converter with configuration keys:{}{}", System.lineSeparator(), converterConfig.keySet());
         plugin.configure(converterConfig);
         return plugin;
     }

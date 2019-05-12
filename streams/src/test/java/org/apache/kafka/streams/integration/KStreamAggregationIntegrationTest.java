@@ -36,6 +36,7 @@ import org.apache.kafka.streams.integration.utils.EmbeddedKafkaCluster;
 import org.apache.kafka.streams.integration.utils.IntegrationTestUtils;
 import org.apache.kafka.streams.kstream.Aggregator;
 import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.Initializer;
 import org.apache.kafka.streams.kstream.KGroupedStream;
 import org.apache.kafka.streams.kstream.KStream;
@@ -43,16 +44,17 @@ import org.apache.kafka.streams.kstream.KeyValueMapper;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.Reducer;
-import org.apache.kafka.streams.kstream.Serialized;
 import org.apache.kafka.streams.kstream.SessionWindowedDeserializer;
 import org.apache.kafka.streams.kstream.SessionWindows;
 import org.apache.kafka.streams.kstream.TimeWindowedDeserializer;
 import org.apache.kafka.streams.kstream.TimeWindows;
 import org.apache.kafka.streams.kstream.Transformer;
+import org.apache.kafka.streams.kstream.UnlimitedWindows;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.kstream.WindowedSerdes;
 import org.apache.kafka.streams.kstream.internals.SessionWindow;
 import org.apache.kafka.streams.kstream.internals.TimeWindow;
+import org.apache.kafka.streams.kstream.internals.UnlimitedWindow;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.KeyValueStore;
@@ -70,6 +72,7 @@ import org.junit.experimental.categories.Category;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
@@ -82,12 +85,15 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static java.time.Duration.ofMillis;
+import static java.time.Instant.ofEpochMilli;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+@SuppressWarnings("unchecked")
 @Category({IntegrationTest.class})
 public class KStreamAggregationIntegrationTest {
     private static final int NUM_BROKERS = 1;
@@ -123,17 +129,13 @@ public class KStreamAggregationIntegrationTest {
         streamsConfiguration.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         streamsConfiguration.put(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getPath());
         streamsConfiguration.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
-        streamsConfiguration.put(IntegrationTestUtils.INTERNAL_LEAVE_GROUP_ON_CLOSE, true);
         streamsConfiguration.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100);
         streamsConfiguration.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.Integer().getClass());
 
         final KeyValueMapper<Integer, String, String> mapper = MockMapper.selectValueMapper();
         stream = builder.stream(streamOneInput, Consumed.with(Serdes.Integer(), Serdes.String()));
-        groupedStream = stream
-            .groupBy(
-                mapper,
-                Serialized.with(Serdes.String(), Serdes.String()));
+        groupedStream = stream.groupBy(mapper, Grouped.with(Serdes.String(), Serdes.String()));
 
         reducer = (value1, value2) -> value1 + ":" + value2;
         initializer = () -> 0;
@@ -199,7 +201,7 @@ public class KStreamAggregationIntegrationTest {
 
         final Serde<Windowed<String>> windowedSerde = WindowedSerdes.timeWindowedSerdeFrom(String.class);
         groupedStream
-                .windowedBy(TimeWindows.of(500L))
+                .windowedBy(TimeWindows.of(ofMillis(500L)))
                 .reduce(reducer)
                 .toStream()
                 .to(outputTopic, Produced.with(windowedSerde, Serdes.String()));
@@ -254,9 +256,8 @@ public class KStreamAggregationIntegrationTest {
 
         // check every message is contained in the expect result
         final String[] allRecords = resultFromConsoleConsumer.split("\n");
-        for (String record: allRecords) {
-            record = "KeyValue(" + record + ")";
-            assertTrue(expectResultString.contains(record));
+        for (final String record: allRecords) {
+            assertTrue(expectResultString.contains("KeyValue(" + record + ")"));
         }
     }
 
@@ -305,7 +306,7 @@ public class KStreamAggregationIntegrationTest {
         produceMessages(secondTimestamp);
 
         final Serde<Windowed<String>> windowedSerde = WindowedSerdes.timeWindowedSerdeFrom(String.class);
-        groupedStream.windowedBy(TimeWindows.of(500L))
+        groupedStream.windowedBy(TimeWindows.of(ofMillis(500L)))
                 .aggregate(
                         initializer,
                         aggregator,
@@ -424,8 +425,8 @@ public class KStreamAggregationIntegrationTest {
         produceMessages(timestamp);
         produceMessages(timestamp);
 
-        stream.groupByKey(Serialized.with(Serdes.Integer(), Serdes.String()))
-                .windowedBy(TimeWindows.of(500L))
+        stream.groupByKey(Grouped.with(Serdes.Integer(), Serdes.String()))
+                .windowedBy(TimeWindows.of(ofMillis(500L)))
                 .count()
                 .toStream((windowedKey, value) -> windowedKey.key() + "@" + windowedKey.window().start()).to(outputTopic, Produced.with(Serdes.String(), Serdes.Long()));
 
@@ -456,7 +457,6 @@ public class KStreamAggregationIntegrationTest {
     @Test
     public void shouldCountSessionWindows() throws Exception {
         final long sessionGap = 5 * 60 * 1000L;
-        final long maintainMillis = sessionGap * 3;
 
         final long t1 = mockTime.milliseconds() - TimeUnit.MILLISECONDS.convert(1, TimeUnit.HOURS);
         final List<KeyValue<String, String>> t1Messages = Arrays.asList(new KeyValue<>("bob", "start"),
@@ -518,8 +518,8 @@ public class KStreamAggregationIntegrationTest {
         final CountDownLatch latch = new CountDownLatch(11);
 
         builder.stream(userSessionsStream, Consumed.with(Serdes.String(), Serdes.String()))
-                .groupByKey(Serialized.with(Serdes.String(), Serdes.String()))
-                .windowedBy(SessionWindows.with(sessionGap).until(maintainMillis))
+                .groupByKey(Grouped.with(Serdes.String(), Serdes.String()))
+                .windowedBy(SessionWindows.with(ofMillis(sessionGap)))
                 .count()
                 .toStream()
                 .transform(() -> new Transformer<Windowed<String>, Long, KeyValue<Object, Object>>() {
@@ -555,7 +555,6 @@ public class KStreamAggregationIntegrationTest {
     @Test
     public void shouldReduceSessionWindows() throws Exception {
         final long sessionGap = 1000L; // something to do with time
-        final long maintainMillis = sessionGap * 3;
 
         final long t1 = mockTime.milliseconds();
         final List<KeyValue<String, String>> t1Messages = Arrays.asList(new KeyValue<>("bob", "start"),
@@ -617,8 +616,8 @@ public class KStreamAggregationIntegrationTest {
         final CountDownLatch latch = new CountDownLatch(11);
         final String userSessionsStore = "UserSessionsStore";
         builder.stream(userSessionsStream, Consumed.with(Serdes.String(), Serdes.String()))
-                .groupByKey(Serialized.with(Serdes.String(), Serdes.String()))
-                .windowedBy(SessionWindows.with(sessionGap).until(maintainMillis))
+                .groupByKey(Grouped.with(Serdes.String(), Serdes.String()))
+                .windowedBy(SessionWindows.with(ofMillis(sessionGap)))
                 .reduce((value1, value2) -> value1 + ":" + value2, Materialized.as(userSessionsStore))
                 .toStream()
                 .foreach((key, value) -> {
@@ -628,8 +627,8 @@ public class KStreamAggregationIntegrationTest {
 
         startStreams();
         latch.await(30, TimeUnit.SECONDS);
-        final ReadOnlySessionStore<String, String> sessionStore
-                = kafkaStreams.store(userSessionsStore, QueryableStoreTypes.sessionStore());
+        final ReadOnlySessionStore<String, String> sessionStore =
+            kafkaStreams.store(userSessionsStore, QueryableStoreTypes.sessionStore());
 
         // verify correct data received
         assertThat(results.get(new Windowed<>("bob", new SessionWindow(t1, t1))), equalTo("start"));
@@ -646,6 +645,92 @@ public class KStreamAggregationIntegrationTest {
         assertThat(bob.next(), equalTo(KeyValue.pair(new Windowed<>("bob", new SessionWindow(t3, t4)), "pause:resume")));
         assertFalse(bob.hasNext());
 
+    }
+
+    @Test
+    public void shouldCountUnlimitedWindows() throws Exception {
+        final long startTime = mockTime.milliseconds() - TimeUnit.MILLISECONDS.convert(1, TimeUnit.HOURS) + 1;
+        final long incrementTime = Duration.ofDays(1).toMillis();
+
+        final long t1 = mockTime.milliseconds() - TimeUnit.MILLISECONDS.convert(1, TimeUnit.HOURS);
+        final List<KeyValue<String, String>> t1Messages = Arrays.asList(new KeyValue<>("bob", "start"),
+                                                                        new KeyValue<>("penny", "start"),
+                                                                        new KeyValue<>("jo", "pause"),
+                                                                        new KeyValue<>("emily", "pause"));
+
+        final Properties producerConfig = TestUtils.producerConfig(
+            CLUSTER.bootstrapServers(),
+            StringSerializer.class,
+            StringSerializer.class,
+            new Properties()
+        );
+
+        IntegrationTestUtils.produceKeyValuesSynchronouslyWithTimestamp(
+            userSessionsStream,
+            t1Messages,
+            producerConfig,
+            t1);
+
+        final long t2 = t1 + incrementTime;
+        IntegrationTestUtils.produceKeyValuesSynchronouslyWithTimestamp(
+            userSessionsStream,
+            Collections.singletonList(
+                new KeyValue<>("emily", "resume")
+            ),
+            producerConfig,
+            t2);
+        final long t3 = t2 + incrementTime;
+        IntegrationTestUtils.produceKeyValuesSynchronouslyWithTimestamp(
+            userSessionsStream,
+            Arrays.asList(
+                new KeyValue<>("bob", "pause"),
+                new KeyValue<>("penny", "stop")
+            ),
+            producerConfig,
+            t3);
+
+        final long t4 = t3 + incrementTime;
+        IntegrationTestUtils.produceKeyValuesSynchronouslyWithTimestamp(
+            userSessionsStream,
+            Arrays.asList(
+                new KeyValue<>("bob", "resume"), // bobs session continues
+                new KeyValue<>("jo", "resume")   // jo's starts new session
+            ),
+            producerConfig,
+            t4);
+
+        final Map<Windowed<String>, KeyValue<Long, Long>> results = new HashMap<>();
+        final CountDownLatch latch = new CountDownLatch(5);
+
+        builder.stream(userSessionsStream, Consumed.with(Serdes.String(), Serdes.String()))
+               .groupByKey(Grouped.with(Serdes.String(), Serdes.String()))
+               .windowedBy(UnlimitedWindows.of().startOn(ofEpochMilli(startTime)))
+               .count()
+               .toStream()
+               .transform(() -> new Transformer<Windowed<String>, Long, KeyValue<Object, Object>>() {
+                   private ProcessorContext context;
+
+                   @Override
+                   public void init(final ProcessorContext context) {
+                       this.context = context;
+                   }
+
+                   @Override
+                   public KeyValue<Object, Object> transform(final Windowed<String> key, final Long value) {
+                       results.put(key, KeyValue.pair(value, context.timestamp()));
+                       latch.countDown();
+                       return null;
+                   }
+
+                   @Override
+                   public void close() {}
+               });
+        startStreams();
+        assertTrue(latch.await(30, TimeUnit.SECONDS));
+        assertThat(results.get(new Windowed<>("bob", new UnlimitedWindow(startTime))), equalTo(KeyValue.pair(2L, t4)));
+        assertThat(results.get(new Windowed<>("penny", new UnlimitedWindow(startTime))), equalTo(KeyValue.pair(1L, t3)));
+        assertThat(results.get(new Windowed<>("jo", new UnlimitedWindow(startTime))), equalTo(KeyValue.pair(1L, t4)));
+        assertThat(results.get(new Windowed<>("emily", new UnlimitedWindow(startTime))), equalTo(KeyValue.pair(1L, t2)));
     }
 
 

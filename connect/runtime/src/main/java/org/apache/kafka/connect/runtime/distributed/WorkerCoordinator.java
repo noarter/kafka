@@ -18,14 +18,16 @@ package org.apache.kafka.connect.runtime.distributed;
 
 import org.apache.kafka.clients.consumer.internals.AbstractCoordinator;
 import org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient;
+import org.apache.kafka.common.message.JoinGroupRequestData;
+import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.metrics.Measurable;
 import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.requests.JoinGroupRequest;
-import org.apache.kafka.common.requests.JoinGroupRequest.ProtocolMetadata;
 import org.apache.kafka.common.utils.CircularIterator;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.connect.storage.ConfigBackingStore;
 import org.apache.kafka.connect.util.ConnectorTaskId;
 import org.slf4j.Logger;
@@ -38,6 +40,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * This class manages the coordination process with the Kafka group coordinator on the broker for managing assignments
@@ -76,14 +79,14 @@ public final class WorkerCoordinator extends AbstractCoordinator implements Clos
         super(logContext,
               client,
               groupId,
+              Optional.empty(),
               rebalanceTimeoutMs,
               sessionTimeoutMs,
               heartbeatIntervalMs,
               metrics,
               metricGrpPrefix,
               time,
-              retryBackoffMs,
-              true);
+              retryBackoffMs);
         this.log = logContext.logger(WorkerCoordinator.class);
         this.restUrl = restUrl;
         this.configStorage = configStorage;
@@ -105,8 +108,8 @@ public final class WorkerCoordinator extends AbstractCoordinator implements Clos
 
     // expose for tests
     @Override
-    protected synchronized boolean ensureCoordinatorReady(final long timeoutMs) {
-        return super.ensureCoordinatorReady(timeoutMs);
+    protected synchronized boolean ensureCoordinatorReady(final Timer timer) {
+        return super.ensureCoordinatorReady(timer);
     }
 
     public void poll(long timeout) {
@@ -117,7 +120,7 @@ public final class WorkerCoordinator extends AbstractCoordinator implements Clos
 
         do {
             if (coordinatorUnknown()) {
-                ensureCoordinatorReady(Long.MAX_VALUE);
+                ensureCoordinatorReady(time.timer(Long.MAX_VALUE));
                 now = time.milliseconds();
             }
 
@@ -133,7 +136,8 @@ public final class WorkerCoordinator extends AbstractCoordinator implements Clos
 
             // Note that because the network client is shared with the background heartbeat thread,
             // we do not want to block in poll longer than the time to the next heartbeat.
-            client.poll(Math.min(Math.max(0, remaining), timeToNextHeartbeat(now)));
+            long pollTimeout = Math.min(Math.max(0, remaining), timeToNextHeartbeat(now));
+            client.poll(time.timer(pollTimeout));
 
             now = time.milliseconds();
             elapsed = now - start;
@@ -142,11 +146,16 @@ public final class WorkerCoordinator extends AbstractCoordinator implements Clos
     }
 
     @Override
-    public List<ProtocolMetadata> metadata() {
+    public JoinGroupRequestData.JoinGroupRequestProtocolCollection metadata() {
         configSnapshot = configStorage.snapshot();
         ConnectProtocol.WorkerState workerState = new ConnectProtocol.WorkerState(restUrl, configSnapshot.offset());
         ByteBuffer metadata = ConnectProtocol.serializeMetadata(workerState);
-        return Collections.singletonList(new ProtocolMetadata(DEFAULT_SUBPROTOCOL, metadata));
+        return new JoinGroupRequestData.JoinGroupRequestProtocolCollection(
+                Collections.singleton(new JoinGroupRequestData.JoinGroupRequestProtocol()
+                        .setName(DEFAULT_SUBPROTOCOL)
+                        .setMetadata(metadata.array()))
+                        .iterator()
+        );
     }
 
     @Override
@@ -161,12 +170,12 @@ public final class WorkerCoordinator extends AbstractCoordinator implements Clos
     }
 
     @Override
-    protected Map<String, ByteBuffer> performAssignment(String leaderId, String protocol, Map<String, ByteBuffer> allMemberMetadata) {
+    protected Map<String, ByteBuffer> performAssignment(String leaderId, String protocol, List<JoinGroupResponseData.JoinGroupResponseMember> allMemberMetadata) {
         log.debug("Performing task assignment");
 
         Map<String, ConnectProtocol.WorkerState> memberConfigs = new HashMap<>();
-        for (Map.Entry<String, ByteBuffer> entry : allMemberMetadata.entrySet())
-            memberConfigs.put(entry.getKey(), ConnectProtocol.deserializeMetadata(entry.getValue()));
+        for (JoinGroupResponseData.JoinGroupResponseMember memberMetadata : allMemberMetadata)
+            memberConfigs.put(memberMetadata.memberId(), ConnectProtocol.deserializeMetadata(ByteBuffer.wrap(memberMetadata.metadata())));
 
         long maxOffset = findMaxMemberConfigOffset(memberConfigs);
         Long leaderOffset = ensureLeaderConfig(maxOffset);
